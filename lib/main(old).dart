@@ -492,74 +492,25 @@ class _TranslationScreenState extends State<TranslationScreen> {
     }
   }
   
-  // Splits text on whitespace into individual words, dropping empties.
-  List<String> _splitIntoWords(String text) =>
-      text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
-
-  // Saves a name -> translation pair to Firestore. If the source and the
-  // translation both split into the same number of whitespace-separated
-  // words (e.g. "John Smith" / "จอห์น สมิธ"), each word pair is *also*
-  // saved as its own dictionary entry, so multi-word names grow the
-  // word-by-word database automatically. If the word counts don't line
-  // up, only the full phrase is saved (safer than guessing an alignment).
-  Future<_SavePairResult> _saveTranslationPair({
-    required String sourceText,
-    required String translationText,
-    required String targetLanguage,
-    bool isRuleGenerated = false,
-  }) async {
-    final String name = targetLanguage == 'english'
-        ? sourceText.trim()
-        : sourceText.trim().toLowerCase();
-    final String translation = translationText.trim();
-
-    Map<String, dynamic> buildData(String n, String t) => {
-          'name': n,
-          'translation': t,
-          'targetLanguage': targetLanguage,
-          'votes': 0,
-          'isUserSubmitted': true,
-          if (isRuleGenerated) 'isRuleGenerated': true,
-          'timestamp': FieldValue.serverTimestamp(),
-        };
-
-    final WriteBatch batch = _firestore.batch();
-    final DocumentReference fullRef = _firestore.collection('translations').doc();
-    batch.set(fullRef, buildData(name, translation));
-    int entryCount = 1;
-
-    final List<String> sourceWords = _splitIntoWords(name);
-    final List<String> translationWords = _splitIntoWords(translation);
-
-    if (sourceWords.length > 1 && sourceWords.length == translationWords.length) {
-      for (int i = 0; i < sourceWords.length; i++) {
-        final DocumentReference wordRef = _firestore.collection('translations').doc();
-        batch.set(wordRef, buildData(sourceWords[i], translationWords[i]));
-        entryCount++;
-      }
-    }
-
-    await batch.commit();
-    return _SavePairResult(fullEntryId: fullRef.id, entryCount: entryCount);
-  }
-  
   // Persist a phonetic-rule-generated suggestion into the shared database,
-  // so it becomes a normal, votable, community entry from now on. Also
-  // splits multi-word names into individual word entries (see above).
+  // so it becomes a normal, votable, community entry from now on.
   Future<void> _saveRuleSuggestionToDatabase(TranslationSuggestion suggestion) async {
     try {
-      final _SavePairResult result = await _saveTranslationPair(
-        sourceText: _currentSourceText,
-        translationText: suggestion.text,
-        targetLanguage: _effectiveTargetLanguage,
-        isRuleGenerated: true,
-      );
+      DocumentReference docRef = await _firestore.collection('translations').add({
+        'name': _currentSourceText,
+        'translation': suggestion.text,
+        'targetLanguage': _effectiveTargetLanguage,
+        'votes': 0,
+        'isUserSubmitted': true,
+        'isRuleGenerated': true,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
       
       setState(() {
         int index = _suggestions.indexWhere((s) => s.id == 'phonetic_rule' && s.text == suggestion.text);
         if (index != -1) {
           _suggestions[index] = TranslationSuggestion(
-            id: result.fullEntryId,
+            id: docRef.id,
             text: suggestion.text,
             votes: 0,
             isUserSubmitted: true,
@@ -569,12 +520,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
       });
       
       if (mounted) {
-        final int wordCount = result.entryCount - 1;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(wordCount > 0
-                ? 'Saved to the shared database (+ $wordCount word${wordCount == 1 ? '' : 's'} added individually)!'
-                : 'Saved to the shared database!'),
+          const SnackBar(
+            content: Text('Saved to the shared database!'),
             backgroundColor: Colors.green,
           ),
         );
@@ -670,11 +618,6 @@ class _TranslationScreenState extends State<TranslationScreen> {
                 ),
                 autofocus: true,
               ),
-              const SizedBox(height: 8),
-              Text(
-                'Tip: for multi-word names (e.g. "John Smith"), matching words on both sides are also saved individually.',
-                style: TextStyle(fontSize: 11, color: Colors.grey[600], fontStyle: FontStyle.italic),
-              ),
             ],
           ),
           actions: [
@@ -689,15 +632,18 @@ class _TranslationScreenState extends State<TranslationScreen> {
                   Navigator.of(dialogContext).pop();
                   
                   try {
-                    final _SavePairResult result = await _saveTranslationPair(
-                      sourceText: _currentSourceText,
-                      translationText: suggestion,
-                      targetLanguage: _effectiveTargetLanguage,
-                    );
+                    DocumentReference docRef = await _firestore.collection('translations').add({
+                      'name': _currentSourceText,
+                      'translation': suggestion,
+                      'targetLanguage': _effectiveTargetLanguage,
+                      'votes': 0,
+                      'isUserSubmitted': true,
+                      'timestamp': FieldValue.serverTimestamp(),
+                    });
                     
                     setState(() {
                       _suggestions.add(TranslationSuggestion(
-                        id: result.fullEntryId,
+                        id: docRef.id,
                         text: suggestion,
                         votes: 0,
                         isUserSubmitted: true,
@@ -706,12 +652,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                     });
                     
                     if (mounted) {
-                      final int wordCount = result.entryCount - 1;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(wordCount > 0
-                              ? 'Thank you! Saved, plus $wordCount word${wordCount == 1 ? '' : 's'} added individually to the dictionary.'
-                              : 'Thank you! Your suggestion has been saved.'),
+                        const SnackBar(
+                          content: Text('Thank you! Your suggestion has been saved.'),
                           backgroundColor: Colors.green,
                         ),
                       );
@@ -1298,14 +1241,4 @@ class TranslationSuggestion {
     required this.isUserSubmitted,
     this.isRuleBased = false,
   });
-}
-
-// Result of saving a (possibly multi-word) translation pair: the
-// Firestore document id of the full-phrase entry, plus how many
-// documents were written in total (1 if it wasn't split into words).
-class _SavePairResult {
-  final String fullEntryId;
-  final int entryCount;
-
-  _SavePairResult({required this.fullEntryId, required this.entryCount});
 }
