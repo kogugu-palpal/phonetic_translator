@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'phonetic_rules.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,6 +54,19 @@ class _TranslationScreenState extends State<TranslationScreen> {
   bool _showSuggestions = false;
   bool _isLoading = false;
   String _selectedTranslation = '';
+
+  // Direction toggle: false = English -> other language, true = Thai -> English
+  bool _thaiToEnglish = false;
+  // Last rule-based guess computed, used to prefill the "suggest" dialog.
+  String? _lastRuleGuess;
+
+  // The name/word actually used for lookups, normalized per direction.
+  // Thai text has no case, so we only lowercase for English input.
+  String get _currentSourceText =>
+      _thaiToEnglish ? _nameController.text.trim() : _nameController.text.trim().toLowerCase();
+
+  // The Firestore 'targetLanguage' value for the current direction.
+  String get _effectiveTargetLanguage => _thaiToEnglish ? 'english' : _selectedLanguage;
   
   // Admin state
   bool _isAdmin = false;
@@ -364,14 +378,16 @@ class _TranslationScreenState extends State<TranslationScreen> {
     }
   }
   
-  // Load translations from Firebase
+  // Load translations from Firebase, combined with a basic phonetic-rule
+  // suggestion (English <-> Thai) so users always have a starting point
+  // even if nobody has added that name to the database yet.
   Future<void> _translateName() async {
-    String name = _nameController.text.trim().toLowerCase();
+    String name = _currentSourceText;
     
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a name to translate'),
+        SnackBar(
+          content: Text(_thaiToEnglish ? 'Please enter a Thai name to translate' : 'Please enter a name to translate'),
           backgroundColor: Colors.red,
         ),
       );
@@ -381,13 +397,16 @@ class _TranslationScreenState extends State<TranslationScreen> {
     setState(() {
       _isLoading = true;
       _showSuggestions = false;
+      _lastRuleGuess = null;
     });
+    
+    final String targetLanguage = _effectiveTargetLanguage;
     
     try {
       QuerySnapshot querySnapshot = await _firestore
           .collection('translations')
           .where('name', isEqualTo: name)
-          .where('targetLanguage', isEqualTo: _selectedLanguage)
+          .where('targetLanguage', isEqualTo: targetLanguage)
           .orderBy('votes', descending: true)
           .get();
       
@@ -401,6 +420,33 @@ class _TranslationScreenState extends State<TranslationScreen> {
           votes: data['votes'] ?? 0,
           isUserSubmitted: data['isUserSubmitted'] ?? false,
         ));
+      }
+      
+      // Combine with a basic phonetic-rule guess (English <-> Thai only).
+      String? ruleGuess;
+      if (_thaiToEnglish) {
+        ruleGuess = thaiToEnglish(name);
+      } else if (targetLanguage == 'thai') {
+        ruleGuess = englishToThai(name);
+      }
+      
+      if (ruleGuess != null && ruleGuess.trim().isNotEmpty) {
+        _lastRuleGuess = ruleGuess;
+        final bool alreadyInDatabase = loadedSuggestions.any(
+          (s) => s.text.trim().toLowerCase() == ruleGuess!.trim().toLowerCase(),
+        );
+        if (!alreadyInDatabase) {
+          loadedSuggestions.insert(
+            0,
+            TranslationSuggestion(
+              id: 'phonetic_rule',
+              text: ruleGuess,
+              votes: 0,
+              isUserSubmitted: false,
+              isRuleBased: true,
+            ),
+          );
+        }
       }
       
       setState(() {
@@ -446,10 +492,63 @@ class _TranslationScreenState extends State<TranslationScreen> {
     }
   }
   
+  // Persist a phonetic-rule-generated suggestion into the shared database,
+  // so it becomes a normal, votable, community entry from now on.
+  Future<void> _saveRuleSuggestionToDatabase(TranslationSuggestion suggestion) async {
+    try {
+      DocumentReference docRef = await _firestore.collection('translations').add({
+        'name': _currentSourceText,
+        'translation': suggestion.text,
+        'targetLanguage': _effectiveTargetLanguage,
+        'votes': 0,
+        'isUserSubmitted': true,
+        'isRuleGenerated': true,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      
+      setState(() {
+        int index = _suggestions.indexWhere((s) => s.id == 'phonetic_rule' && s.text == suggestion.text);
+        if (index != -1) {
+          _suggestions[index] = TranslationSuggestion(
+            id: docRef.id,
+            text: suggestion.text,
+            votes: 0,
+            isUserSubmitted: true,
+            isRuleBased: false,
+          );
+        }
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Saved to the shared database!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+  
   Future<void> _selectSuggestion(TranslationSuggestion suggestion) async {
     setState(() {
       _selectedTranslation = suggestion.text;
     });
+    
+    // Rule-based suggestions aren't saved in Firestore yet, so there's
+    // no document to vote on. Users can tap "Save" to add it first.
+    if (suggestion.isRuleBased) {
+      return;
+    }
     
     try {
       await _firestore.collection('translations').doc(suggestion.id).update({
@@ -489,7 +588,8 @@ class _TranslationScreenState extends State<TranslationScreen> {
   }
   
   void _showAddTranslationDialog() {
-    final TextEditingController suggestionController = TextEditingController();
+    final TextEditingController suggestionController =
+        TextEditingController(text: _lastRuleGuess ?? '');
     
     showDialog(
       context: context,
@@ -501,11 +601,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'English: ${_nameController.text.trim()}',
+                '${_thaiToEnglish ? 'Thai' : 'English'}: ${_nameController.text.trim()}',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
-              Text('Target: ${_languages[_selectedLanguage]}'),
+              Text('Target: ${_thaiToEnglish ? 'English' : _languages[_selectedLanguage]}'),
               const SizedBox(height: 16),
               TextField(
                 controller: suggestionController,
@@ -533,9 +633,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                   
                   try {
                     DocumentReference docRef = await _firestore.collection('translations').add({
-                      'name': _nameController.text.trim().toLowerCase(),
+                      'name': _currentSourceText,
                       'translation': suggestion,
-                      'targetLanguage': _selectedLanguage,
+                      'targetLanguage': _effectiveTargetLanguage,
                       'votes': 0,
                       'isUserSubmitted': true,
                       'timestamp': FieldValue.serverTimestamp(),
@@ -586,6 +686,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       _suggestions = [];
       _showSuggestions = false;
       _selectedTranslation = '';
+      _lastRuleGuess = null;
     });
   }
 
@@ -641,18 +742,88 @@ class _TranslationScreenState extends State<TranslationScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-            const Text(
-              'English → Other Languages (Beta)',
-              style: TextStyle(fontSize: 14, color: Colors.grey),
+            Text(
+              _thaiToEnglish ? 'Thai → English (Beta)' : 'English → Other Languages (Beta)',
+              style: const TextStyle(fontSize: 14, color: Colors.grey),
               textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            
+            // Direction toggle
+            Container(
+              padding: const EdgeInsets.all(4),
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (!_thaiToEnglish) return;
+                        setState(() {
+                          _thaiToEnglish = false;
+                          _showSuggestions = false;
+                          _suggestions = [];
+                          _selectedTranslation = '';
+                        });
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        decoration: BoxDecoration(
+                          color: !_thaiToEnglish ? Colors.blue : Colors.transparent,
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        child: Text(
+                          'English → Other',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: !_thaiToEnglish ? Colors.white : Colors.black87,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (_thaiToEnglish) return;
+                        setState(() {
+                          _thaiToEnglish = true;
+                          _showSuggestions = false;
+                          _suggestions = [];
+                          _selectedTranslation = '';
+                        });
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        decoration: BoxDecoration(
+                          color: _thaiToEnglish ? Colors.blue : Colors.transparent,
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        child: Text(
+                          'Thai → English',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: _thaiToEnglish ? Colors.white : Colors.black87,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 32),
             
             TextField(
               controller: _nameController,
               decoration: InputDecoration(
-                labelText: 'Enter English name',
-                hintText: 'e.g., John, Mary, David',
+                labelText: _thaiToEnglish ? 'Enter Thai name' : 'Enter English name',
+                hintText: _thaiToEnglish ? 'e.g. จอห์น, มารี, เดวิด' : 'e.g., John, Mary, David',
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -665,45 +836,62 @@ class _TranslationScreenState extends State<TranslationScreen> {
             ),
             const SizedBox(height: 24),
             
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey[400]!),
-                borderRadius: BorderRadius.circular(12),
-                color: Colors.grey[50],
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.language, color: Colors.blue),
-                  const SizedBox(width: 12),
-                  const Text('Target:', style: TextStyle(fontSize: 16)),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        value: _selectedLanguage,
-                        isExpanded: true,
-                        items: _languages.entries.map((entry) {
-                          return DropdownMenuItem<String>(
-                            value: entry.key,
-                            child: Text(entry.value),
-                          );
-                        }).toList(),
-                        onChanged: (String? newValue) {
-                          if (newValue != null) {
-                            setState(() {
-                              _selectedLanguage = newValue;
-                              _showSuggestions = false;
-                              _suggestions = [];
-                            });
-                          }
-                        },
+            if (_thaiToEnglish)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey[400]!),
+                  borderRadius: BorderRadius.circular(12),
+                  color: Colors.grey[50],
+                ),
+                child: Row(
+                  children: const [
+                    Icon(Icons.language, color: Colors.blue),
+                    SizedBox(width: 12),
+                    Text('Target: English', style: TextStyle(fontSize: 16)),
+                  ],
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey[400]!),
+                  borderRadius: BorderRadius.circular(12),
+                  color: Colors.grey[50],
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.language, color: Colors.blue),
+                    const SizedBox(width: 12),
+                    const Text('Target:', style: TextStyle(fontSize: 16)),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _selectedLanguage,
+                          isExpanded: true,
+                          items: _languages.entries.map((entry) {
+                            return DropdownMenuItem<String>(
+                              value: entry.key,
+                              child: Text(entry.value),
+                            );
+                          }).toList(),
+                          onChanged: (String? newValue) {
+                            if (newValue != null) {
+                              setState(() {
+                                _selectedLanguage = newValue;
+                                _showSuggestions = false;
+                                _suggestions = [];
+                              });
+                            }
+                          },
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
             const SizedBox(height: 32),
             
             Row(
@@ -806,7 +994,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                             color: isSelected ? Colors.blue[100] : Colors.white,
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                              color: isSelected ? Colors.blue : Colors.grey[300]!,
+                              color: suggestion.isRuleBased
+                                  ? Colors.purple[200]!
+                                  : (isSelected ? Colors.blue : Colors.grey[300]!),
                               width: isSelected ? 2 : 1,
                             ),
                           ),
@@ -828,7 +1018,26 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                 ),
                                 const SizedBox(width: 4),
                                 Text('${suggestion.votes} votes'),
-                                if (suggestion.isUserSubmitted) ...[
+                                if (suggestion.isRuleBased) ...[
+                                  const SizedBox(width: 12),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.purple[100],
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: const Text(
+                                      'Phonetic Rule',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.purple,
+                                      ),
+                                    ),
+                                  ),
+                                ] else if (suggestion.isUserSubmitted) ...[
                                   const SizedBox(width: 12),
                                   Container(
                                     padding: const EdgeInsets.symmetric(
@@ -850,25 +1059,31 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                 ],
                               ],
                             ),
-                            trailing: _isAdmin
-                                ? Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: Icon(Icons.edit, color: Colors.orange),
-                                        onPressed: () => _editTranslation(suggestion),
-                                        tooltip: 'Edit',
-                                      ),
-                                      IconButton(
-                                        icon: Icon(Icons.delete, color: Colors.red),
-                                        onPressed: () => _deleteTranslation(suggestion),
-                                        tooltip: 'Delete',
-                                      ),
-                                    ],
+                            trailing: suggestion.isRuleBased
+                                ? IconButton(
+                                    icon: const Icon(Icons.bookmark_add, color: Colors.purple),
+                                    tooltip: 'Save to database',
+                                    onPressed: () => _saveRuleSuggestionToDatabase(suggestion),
                                   )
-                                : (isSelected
-                                    ? const Icon(Icons.check_circle, color: Colors.blue)
-                                    : null),
+                                : (_isAdmin
+                                    ? Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            icon: Icon(Icons.edit, color: Colors.orange),
+                                            onPressed: () => _editTranslation(suggestion),
+                                            tooltip: 'Edit',
+                                          ),
+                                          IconButton(
+                                            icon: Icon(Icons.delete, color: Colors.red),
+                                            onPressed: () => _deleteTranslation(suggestion),
+                                            tooltip: 'Delete',
+                                          ),
+                                        ],
+                                      )
+                                    : (isSelected
+                                        ? const Icon(Icons.check_circle, color: Colors.blue)
+                                        : null)),
                             onTap: () => _selectSuggestion(suggestion),
                           ),
                         );
@@ -1017,11 +1232,13 @@ class TranslationSuggestion {
   final String text;
   final int votes;
   final bool isUserSubmitted;
+  final bool isRuleBased;
   
   TranslationSuggestion({
     required this.id,
     required this.text,
     required this.votes,
     required this.isUserSubmitted,
+    this.isRuleBased = false,
   });
 }
