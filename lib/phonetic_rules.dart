@@ -1,28 +1,34 @@
-/// Basic rule-based phonetic transliteration between English and Thai.
-///
-/// These are simplified, deterministic approximations (not a full
-/// linguistic transliteration engine). They exist to give users a
-/// starting suggestion, which can then be corrected and saved to the
-/// shared Firestore database by the community.
-library phonetic_rules;
+// Basic rule-based phonetic transliteration between English and Thai.
+//
+// These are simplified, deterministic approximations (not a full
+// linguistic transliteration engine). They exist to give users a
+// starting suggestion, which can then be corrected and saved to the
+// shared Firestore database by the community.
 
 /// Converts an English name/word into an approximate Thai spelling.
 ///
-/// Example: "john" -> "จอน", "mary" -> "แมรี"
+/// This version is syllable-aware for vowels, which matters in Thai:
+/// - A vowel that attaches to a consonant does NOT get its own carrier.
+///   e.g. "ga" -> "กา" (consonant ก + vowel sign า), NOT "กอา".
+///   The carrier อ is only used when a vowel has no consonant to attach
+///   to (start of a word/syllable, e.g. "a" alone -> "อา").
+/// - Some Thai vowels are written BEFORE their consonant even though the
+///   English spelling has the consonant first (e.g. "jo" -> "โจ", not
+///   "จโอ"). This function reorders those automatically.
+///
+/// Examples: "ga" -> "กา" (not "กอา"), "jo" -> "โจ", "mary" -> "มารย"
+/// These are still approximations — spelling alone can't capture silent
+/// letters or irregular English pronunciation (e.g. the silent "h" in
+/// "John", or the "air" sound of "a" in "Mary").
 String englishToThai(String input) {
   final String text = input.trim().toLowerCase();
   if (text.isEmpty) return '';
 
-  // Longest-match-first table. Multi-letter clusters are listed so they
-  // are matched before their single-letter components.
-  final Map<String, String> rules = <String, String>{
-    // Common English name endings / clusters
-    'tion': 'ชั่น',
-    'sion': 'ชั่น',
+  // Consonants and pre-formed clusters: matched greedily (longest first),
+  // then written to the output as-is.
+  const Map<String, String> consonants = <String, String>{
     'tch': 'ช',
     'dge': 'จ',
-    'igh': 'ไอ',
-    'ough': 'อู',
     'ck': 'ก',
     'ph': 'ฟ',
     'th': 'ธ',
@@ -32,19 +38,7 @@ String englishToThai(String input) {
     'ny': 'ญ',
     'wh': 'ว',
     'qu': 'คว',
-    // Vowel digraphs (checked before single vowels)
-    'ee': 'อี',
-    'ea': 'อี',
-    'ay': 'เอ',
-    'ai': 'ไอ',
-    'oo': 'อู',
-    'ou': 'เอา',
-    'ow': 'โอ',
-    'oy': 'ออย',
-    'ie': 'ไอ',
-    'ue': 'อู',
-    'ey': 'เอ',
-    // Single consonants
+    'kh': 'ค',
     'b': 'บ',
     'c': 'ค',
     'd': 'ด',
@@ -66,44 +60,98 @@ String englishToThai(String input) {
     'x': 'ซ',
     'y': 'ย',
     'z': 'ซ',
-    // Single vowels
-    'a': 'อา',
-    'e': 'เอ',
-    'i': 'อิ',
-    'o': 'โอ',
-    'u': 'อุ',
   };
 
-  final int maxRuleLen = rules.keys
-      .map((String k) => k.length)
-      .fold(0, (int a, int b) => a > b ? a : b);
+  // Vowels that attach directly AFTER a consonant (no carrier needed).
+  // "bare" = form used right after a consonant; "standalone" = form used
+  // when there's no consonant to attach to, so it needs an อ carrier.
+  const Map<String, List<String>> trailingVowels = <String, List<String>>{
+    // key: [bare, standalone]
+    'ee': ['ี', 'อี'],
+    'ea': ['ี', 'อี'],
+    'ey': ['ี', 'อี'],
+    'oo': ['ู', 'อู'],
+    'ough': ['ู', 'อู'],
+    'ou': ['าว', 'อาว'],
+    'oy': ['อย', 'ออย'],
+    'ue': ['ือ', 'อือ'],
+    'a': ['า', 'อา'],
+    'i': ['ิ', 'อิ'],
+    'u': ['ุ', 'อุ'],
+  };
 
-  final StringBuffer out = StringBuffer();
+  // Vowels that must be written BEFORE the consonant they attach to (Thai
+  // "leading vowels"). "leading" = glyph placed before the consonant;
+  // "standalone" = form used with no consonant (word starts with the
+  // vowel sound, or it's at the end with nothing to attach to).
+  const Map<String, List<String>> leadingVowels = <String, List<String>>{
+    // key: [leading, standalone]
+    'igh': ['ไ', 'ไอ'],
+    'ai': ['ไ', 'ไอ'],
+    'ay': ['ไ', 'ไอ'],
+    'ie': ['ไ', 'ไอ'],
+    'ow': ['โ', 'โอ'],
+    'e': ['เ', 'เอ'],
+    'o': ['โ', 'โอ'],
+  };
+
+  // Pre-formed syllables that already include their own vowel — written
+  // as-is, no carrier/reorder logic needed.
+  const Map<String, String> complete = <String, String>{
+    'tion': 'ชั่น',
+    'sion': 'ชั่น',
+  };
+
+  // --- Pass 1: tokenize into consonant / trailing-vowel / leading-vowel /
+  // complete / literal units, longest match first. ---
+  final List<MapEntry<String, String>> tokens = <MapEntry<String, String>>[];
+  final Set<String> allKeys = <String>{
+    ...complete.keys,
+    ...consonants.keys,
+    ...trailingVowels.keys,
+    ...leadingVowels.keys,
+  };
+  final int maxLen = allKeys.map((k) => k.length).fold(0, (a, b) => a > b ? a : b);
+
   int i = 0;
   while (i < text.length) {
     final String ch = text[i];
 
-    // Pass through spaces, hyphens, apostrophes and digits untouched.
     if (ch == ' ' || ch == '-' || ch == "'" || RegExp(r'[0-9]').hasMatch(ch)) {
-      out.write(ch);
+      tokens.add(MapEntry('literal', ch));
       i++;
       continue;
     }
-
     if (!RegExp(r'[a-z]').hasMatch(ch)) {
-      // Unrecognized character (e.g. already Thai/other script): skip.
-      i++;
+      i++; // Unrecognized character (e.g. already non-Latin): skip.
       continue;
     }
 
     bool matched = false;
     final int remaining = text.length - i;
-    final int upperBound = remaining < maxRuleLen ? remaining : maxRuleLen;
+    final int upperBound = remaining < maxLen ? remaining : maxLen;
     for (int len = upperBound; len >= 1; len--) {
       final String chunk = text.substring(i, i + len);
-      final String? mapped = rules[chunk];
-      if (mapped != null) {
-        out.write(mapped);
+      if (complete.containsKey(chunk)) {
+        tokens.add(MapEntry('complete', chunk));
+        i += len;
+        matched = true;
+        break;
+      }
+      if (leadingVowels.containsKey(chunk)) {
+        tokens.add(MapEntry('leadingVowel', chunk));
+        i += len;
+        matched = true;
+        break;
+      }
+      if (trailingVowels.containsKey(chunk)) {
+        tokens.add(MapEntry('trailingVowel', chunk));
+        i += len;
+        matched = true;
+        break;
+      }
+      if (consonants.containsKey(chunk)) {
+        tokens.add(MapEntry('consonant', chunk));
         i += len;
         matched = true;
         break;
@@ -111,9 +159,62 @@ String englishToThai(String input) {
     }
 
     if (!matched) {
-      // Fallback: keep the raw character rather than dropping it.
-      out.write(ch);
+      tokens.add(MapEntry('literal', ch));
       i++;
+    }
+  }
+
+  // --- Pass 2: assemble Thai text, attaching vowels to the correct side
+  // of their consonant and skipping the redundant carrier when possible. ---
+  final StringBuffer out = StringBuffer();
+  int idx = 0;
+  while (idx < tokens.length) {
+    final MapEntry<String, String> tok = tokens[idx];
+
+    switch (tok.key) {
+      case 'literal':
+        out.write(tok.value);
+        idx++;
+        break;
+
+      case 'complete':
+        out.write(complete[tok.value]);
+        idx++;
+        break;
+
+      case 'consonant':
+        final String consonantGlyph = consonants[tok.value]!;
+        final bool hasNext = idx + 1 < tokens.length;
+        final MapEntry<String, String>? next = hasNext ? tokens[idx + 1] : null;
+
+        if (next != null && next.key == 'leadingVowel') {
+          // e.g. "t" + "e" -> "เ" + "ท" (leading vowel goes first)
+          out.write(leadingVowels[next.value]![0]);
+          out.write(consonantGlyph);
+          idx += 2;
+        } else if (next != null && next.key == 'trailingVowel') {
+          // e.g. "g" + "a" -> "ก" + "า" (bare form, no extra อ carrier)
+          out.write(consonantGlyph);
+          out.write(trailingVowels[next.value]![0]);
+          idx += 2;
+        } else {
+          out.write(consonantGlyph);
+          idx++;
+        }
+        break;
+
+      case 'trailingVowel':
+        // Reached only when there's no preceding consonant to attach to
+        // (start of word/syllable) -> needs its own carrier.
+        out.write(trailingVowels[tok.value]![1]);
+        idx++;
+        break;
+
+      case 'leadingVowel':
+        // Same idea: nothing to attach before, so use the standalone form.
+        out.write(leadingVowels[tok.value]![1]);
+        idx++;
+        break;
     }
   }
 

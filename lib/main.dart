@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'phonetic_rules.dart';
@@ -278,7 +279,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                       }
                     });
                     
-                    Navigator.of(dialogContext).pop();
+                    if (dialogContext.mounted) {
+                      Navigator.of(dialogContext).pop();
+                    }
                     
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -596,9 +599,21 @@ class _TranslationScreenState extends State<TranslationScreen> {
       _selectedTranslation = suggestion.text;
     });
     
+    // Copy the tapped text to the clipboard right away, regardless of
+    // whether the vote below succeeds — copying shouldn't depend on it.
+    await Clipboard.setData(ClipboardData(text: suggestion.text));
+    
     // Rule-based suggestions aren't saved in Firestore yet, so there's
     // no document to vote on. Users can tap "Save" to add it first.
     if (suggestion.isRuleBased) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Copied "${suggestion.text}" to clipboard'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
       return;
     }
     
@@ -622,8 +637,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Voted for: ${suggestion.text}'),
+            content: Text('Copied "${suggestion.text}" to clipboard — vote counted!'),
             backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -631,7 +647,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error voting: $e'),
+            content: Text('Copied, but error voting: $e'),
             backgroundColor: Colors.red,
           ),
         );
@@ -1140,7 +1156,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                       )
                                     : (isSelected
                                         ? const Icon(Icons.check_circle, color: Colors.blue)
-                                        : null)),
+                                        : Icon(Icons.copy, color: Colors.grey[400], size: 20))),
                             onTap: () => _selectSuggestion(suggestion),
                           ),
                         );
