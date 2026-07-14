@@ -90,6 +90,12 @@ String englishToThai(String input) {
     'ai': ['ไ', 'ไอ'],
     'ay': ['ไ', 'ไอ'],
     'ie': ['ไ', 'ไอ'],
+    // "Magic/silent e" endings: a lone vowel + trailing "e" at the end of
+    // a word usually makes the vowel say its own name and the "e" itself
+    // stays silent (e.g. "Moe", "Joe", "Doe", "Rae"). Matched as a single
+    // 2-letter unit so it isn't read as two separate vowel sounds.
+    'oe': ['โ', 'โอ'],
+    'ae': ['ไ', 'ไอ'],
     'ow': ['โ', 'โอ'],
     'e': ['เ', 'เอ'],
     'o': ['โ', 'โอ'],

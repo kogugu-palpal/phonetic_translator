@@ -599,21 +599,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
       _selectedTranslation = suggestion.text;
     });
     
-    // Copy the tapped text to the clipboard right away, regardless of
-    // whether the vote below succeeds — copying shouldn't depend on it.
-    await Clipboard.setData(ClipboardData(text: suggestion.text));
-    
     // Rule-based suggestions aren't saved in Firestore yet, so there's
     // no document to vote on. Users can tap "Save" to add it first.
     if (suggestion.isRuleBased) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Copied "${suggestion.text}" to clipboard'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
       return;
     }
     
@@ -637,9 +625,8 @@ class _TranslationScreenState extends State<TranslationScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Copied "${suggestion.text}" to clipboard — vote counted!'),
+            content: Text('Voted for: ${suggestion.text}'),
             backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
           ),
         );
       }
@@ -647,11 +634,25 @@ class _TranslationScreenState extends State<TranslationScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Copied, but error voting: $e'),
+            content: Text('Error voting: $e'),
             backgroundColor: Colors.red,
           ),
         );
       }
+    }
+  }
+  
+  // Copies text to the clipboard — wired to its own dedicated button,
+  // separate from voting/selecting, so it never interferes with them.
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Copied "$text" to clipboard'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
     }
   }
   
@@ -774,7 +775,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
             Row(
               children: [
                 Text(
-                  'v001.25.12.11',
+                  'v002.26.07.13',
                   style: TextStyle(fontSize: 12, color: Colors.grey),
                 ),
                 SizedBox(width: 16),
@@ -1133,15 +1134,30 @@ class _TranslationScreenState extends State<TranslationScreen> {
                               ],
                             ),
                             trailing: suggestion.isRuleBased
-                                ? IconButton(
-                                    icon: const Icon(Icons.bookmark_add, color: Colors.purple),
-                                    tooltip: 'Save to database',
-                                    onPressed: () => _saveRuleSuggestionToDatabase(suggestion),
+                                ? Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: Icon(Icons.copy, color: Colors.grey[600], size: 20),
+                                        tooltip: 'Copy to clipboard',
+                                        onPressed: () => _copyToClipboard(suggestion.text),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.bookmark_add, color: Colors.purple),
+                                        tooltip: 'Save to database',
+                                        onPressed: () => _saveRuleSuggestionToDatabase(suggestion),
+                                      ),
+                                    ],
                                   )
                                 : (_isAdmin
                                     ? Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
+                                          IconButton(
+                                            icon: Icon(Icons.copy, color: Colors.grey[600], size: 20),
+                                            tooltip: 'Copy to clipboard',
+                                            onPressed: () => _copyToClipboard(suggestion.text),
+                                          ),
                                           IconButton(
                                             icon: Icon(Icons.edit, color: Colors.orange),
                                             onPressed: () => _editTranslation(suggestion),
@@ -1154,9 +1170,21 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                           ),
                                         ],
                                       )
-                                    : (isSelected
-                                        ? const Icon(Icons.check_circle, color: Colors.blue)
-                                        : Icon(Icons.copy, color: Colors.grey[400], size: 20))),
+                                    : Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (isSelected)
+                                            const Padding(
+                                              padding: EdgeInsets.only(right: 4),
+                                              child: Icon(Icons.check_circle, color: Colors.blue),
+                                            ),
+                                          IconButton(
+                                            icon: Icon(Icons.copy, color: Colors.grey[600], size: 20),
+                                            tooltip: 'Copy to clipboard',
+                                            onPressed: () => _copyToClipboard(suggestion.text),
+                                          ),
+                                        ],
+                                      )),
                             onTap: () => _selectSuggestion(suggestion),
                           ),
                         );
