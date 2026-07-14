@@ -439,8 +439,17 @@ class _TranslationScreenState extends State<TranslationScreen> {
           (s) => s.text.trim().toLowerCase() == ruleGuess!.trim().toLowerCase(),
         );
         if (!alreadyInDatabase) {
+          // Community suggestions are already sorted by votes (descending)
+          // from the Firestore query above. The rule-based guess starts
+          // at 0 votes and hasn't been vetted by anyone, so it should
+          // rank right after any suggestion that already has votes —
+          // never ahead of a suggestion people actually chose.
+          int insertIndex = loadedSuggestions.indexWhere((s) => s.votes <= 0);
+          if (insertIndex == -1) {
+            insertIndex = loadedSuggestions.length;
+          }
           loadedSuggestions.insert(
-            0,
+            insertIndex,
             TranslationSuggestion(
               id: 'phonetic_rule',
               text: ruleGuess,
