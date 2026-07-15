@@ -91,7 +91,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
 
   // Admin login dialog
   void _showAdminLogin() {
-    final TextEditingController nameController = TextEditingController();
+    final TextEditingController emailController = TextEditingController();
     final TextEditingController passwordController = TextEditingController();
 
     showDialog(
@@ -109,11 +109,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
-                controller: nameController,
+                controller: emailController,
                 decoration: InputDecoration(
-                  labelText: 'Admin Name',
+                  labelText: 'Admin Email',
                   border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.person),
+                  prefixIcon: Icon(Icons.email),
                 ),
               ),
               SizedBox(height: 16),
@@ -135,33 +135,24 @@ class _TranslationScreenState extends State<TranslationScreen> {
             ),
             ElevatedButton(
               onPressed: () async {
-                String name = nameController.text.trim();
+                String email = emailController.text.trim();
                 String password = passwordController.text;
 
-                if (name.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Please enter your name'),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
-                  return;
-                }
                 try {
                   await FirebaseAuth.instance.signInWithEmailAndPassword(
-                    email: 'kogyipalpal@gmail.com',
-                    password: password, // whatever they typed in the dialog
+                    email: email,
+                    password: password,
                   );
                   setState(() {
                     _isAdmin = true;
-                    _adminName = name;
+                    _adminName = 'Admin'; // fixed display, never shows the email
                   });
                   if (dialogContext.mounted) {
                     Navigator.of(dialogContext).pop();
                   }
                 } catch (e) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Wrong password!')),
+                    const SnackBar(content: Text('Wrong email or password!')),
                   );
                 }
               },
