@@ -425,6 +425,35 @@ class _TranslationScreenState extends State<TranslationScreen> {
         ));
       }
       
+      // If nobody's translated this exact multi-word name yet, try
+      // combining already-submitted individual word translations from
+      // the community database (e.g. words added one-by-one from a
+      // reference list). This ranks above the phonetic-rule guess, since
+      // it's built from real community entries, not a raw algorithm.
+      final List<String> nameWords = _splitIntoWords(name);
+      if (nameWords.length > 1) {
+        final String? wordComboGuess = await _buildWordCombinationSuggestion(
+          nameWords,
+          targetLanguage,
+        );
+        if (wordComboGuess != null && wordComboGuess.trim().isNotEmpty) {
+          final bool alreadyListed = loadedSuggestions.any(
+            (s) => s.text.trim().toLowerCase() == wordComboGuess.trim().toLowerCase(),
+          );
+          if (!alreadyListed) {
+            loadedSuggestions.add(
+              TranslationSuggestion(
+                id: 'word_combo',
+                text: wordComboGuess,
+                votes: 0,
+                isUserSubmitted: false,
+                isWordCombo: true,
+              ),
+            );
+          }
+        }
+      }
+      
       // Combine with a basic phonetic-rule guess (English <-> Thai only).
       String? ruleGuess;
       if (_thaiToEnglish) {
@@ -439,17 +468,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
           (s) => s.text.trim().toLowerCase() == ruleGuess!.trim().toLowerCase(),
         );
         if (!alreadyInDatabase) {
-          // Community suggestions are already sorted by votes (descending)
-          // from the Firestore query above. The rule-based guess starts
-          // at 0 votes and hasn't been vetted by anyone, so it should
-          // rank right after any suggestion that already has votes —
-          // never ahead of a suggestion people actually chose.
-          int insertIndex = loadedSuggestions.indexWhere((s) => s.votes <= 0);
-          if (insertIndex == -1) {
-            insertIndex = loadedSuggestions.length;
-          }
-          loadedSuggestions.insert(
-            insertIndex,
+          // Community suggestions (including word-combination ones built
+          // from community entries) are always ranked above an unvetted
+          // algorithmic guess, even when votes are tied at 0. So the
+          // rule-based guess always goes at the very end of the list.
+          loadedSuggestions.add(
             TranslationSuggestion(
               id: 'phonetic_rule',
               text: ruleGuess,
@@ -508,6 +531,41 @@ class _TranslationScreenState extends State<TranslationScreen> {
   List<String> _splitIntoWords(String text) =>
       text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
 
+  // Looks up each word of a multi-word name individually in the community
+  // database (each word's top-voted translation) and joins them into one
+  // suggestion. Returns null if any word isn't found individually, since
+  // a partial combination would be misleading.
+  Future<String?> _buildWordCombinationSuggestion(
+    List<String> words,
+    String targetLanguage,
+  ) async {
+    try {
+      final List<String?> wordTranslations = await Future.wait(
+        words.map((String word) async {
+          final QuerySnapshot snap = await _firestore
+              .collection('translations')
+              .where('name', isEqualTo: word)
+              .where('targetLanguage', isEqualTo: targetLanguage)
+              .orderBy('votes', descending: true)
+              .limit(1)
+              .get();
+          if (snap.docs.isEmpty) return null;
+          final Map<String, dynamic> data = snap.docs.first.data() as Map<String, dynamic>;
+          final String? translation = data['translation'] as String?;
+          return (translation == null || translation.trim().isEmpty) ? null : translation.trim();
+        }),
+      );
+
+      if (wordTranslations.any((String? t) => t == null)) {
+        return null; // Can't fully combine if any single word is missing.
+      }
+
+      return wordTranslations.map((String? t) => t!).join(' ');
+    } catch (e) {
+      return null;
+    }
+  }
+
   // Saves a name -> translation pair to Firestore. If the source and the
   // translation both split into the same number of whitespace-separated
   // words (e.g. "John Smith" / "จอห์น สมิธ"), each word pair is *also*
@@ -555,20 +613,21 @@ class _TranslationScreenState extends State<TranslationScreen> {
     return _SavePairResult(fullEntryId: fullRef.id, entryCount: entryCount);
   }
   
-  // Persist a phonetic-rule-generated suggestion into the shared database,
-  // so it becomes a normal, votable, community entry from now on. Also
-  // splits multi-word names into individual word entries (see above).
+  // Persist a generated (rule-based or word-combination) suggestion into
+  // the shared database, so it becomes a normal, votable, community
+  // entry from now on. Also splits multi-word names into individual word
+  // entries (see _saveTranslationPair above).
   Future<void> _saveRuleSuggestionToDatabase(TranslationSuggestion suggestion) async {
     try {
       final _SavePairResult result = await _saveTranslationPair(
         sourceText: _currentSourceText,
         translationText: suggestion.text,
         targetLanguage: _effectiveTargetLanguage,
-        isRuleGenerated: true,
+        isRuleGenerated: suggestion.isRuleBased,
       );
       
       setState(() {
-        int index = _suggestions.indexWhere((s) => s.id == 'phonetic_rule' && s.text == suggestion.text);
+        int index = _suggestions.indexWhere((s) => s.id == suggestion.id && s.text == suggestion.text);
         if (index != -1) {
           _suggestions[index] = TranslationSuggestion(
             id: result.fullEntryId,
@@ -576,6 +635,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
             votes: 0,
             isUserSubmitted: true,
             isRuleBased: false,
+            isWordCombo: false,
           );
         }
       });
@@ -608,9 +668,10 @@ class _TranslationScreenState extends State<TranslationScreen> {
       _selectedTranslation = suggestion.text;
     });
     
-    // Rule-based suggestions aren't saved in Firestore yet, so there's
-    // no document to vote on. Users can tap "Save" to add it first.
-    if (suggestion.isRuleBased) {
+    // Rule-based and word-combination suggestions aren't saved in
+    // Firestore yet, so there's no document to vote on. Users can tap
+    // "Save" to add it first.
+    if (suggestion.isRuleBased || suggestion.isWordCombo) {
       return;
     }
     
@@ -1079,7 +1140,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                             border: Border.all(
                               color: suggestion.isRuleBased
                                   ? Colors.purple[200]!
-                                  : (isSelected ? Colors.blue : Colors.grey[300]!),
+                                  : (suggestion.isWordCombo
+                                      ? Colors.teal[200]!
+                                      : (isSelected ? Colors.blue : Colors.grey[300]!)),
                               width: isSelected ? 2 : 1,
                             ),
                           ),
@@ -1120,6 +1183,25 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                       ),
                                     ),
                                   ),
+                                ] else if (suggestion.isWordCombo) ...[
+                                  const SizedBox(width: 12),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.teal[100],
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: const Text(
+                                      'From Dictionary',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.teal,
+                                      ),
+                                    ),
+                                  ),
                                 ] else if (suggestion.isUserSubmitted) ...[
                                   const SizedBox(width: 12),
                                   Container(
@@ -1142,7 +1224,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                 ],
                               ],
                             ),
-                            trailing: suggestion.isRuleBased
+                            trailing: (suggestion.isRuleBased || suggestion.isWordCombo)
                                 ? Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
@@ -1152,7 +1234,10 @@ class _TranslationScreenState extends State<TranslationScreen> {
                                         onPressed: () => _copyToClipboard(suggestion.text),
                                       ),
                                       IconButton(
-                                        icon: const Icon(Icons.bookmark_add, color: Colors.purple),
+                                        icon: Icon(
+                                          Icons.bookmark_add,
+                                          color: suggestion.isRuleBased ? Colors.purple : Colors.teal,
+                                        ),
                                         tooltip: 'Save to database',
                                         onPressed: () => _saveRuleSuggestionToDatabase(suggestion),
                                       ),
@@ -1343,6 +1428,7 @@ class TranslationSuggestion {
   final int votes;
   final bool isUserSubmitted;
   final bool isRuleBased;
+  final bool isWordCombo;
   
   TranslationSuggestion({
     required this.id,
@@ -1350,6 +1436,7 @@ class TranslationSuggestion {
     required this.votes,
     required this.isUserSubmitted,
     this.isRuleBased = false,
+    this.isWordCombo = false,
   });
 }
 
