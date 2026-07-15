@@ -3,10 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'phonetic_rules.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   await Firebase.initializeApp(
     options: const FirebaseOptions(
       apiKey: "AIzaSyBOBiE-RtQuzzW4Doi_NZKc_f1dSa83haU",
@@ -17,7 +18,16 @@ void main() async {
       appId: "1:69781164580:web:a7908c75d41f798002beb1",
     ),
   );
-  
+
+  if (FirebaseAuth.instance.currentUser == null) {
+    try {
+      await FirebaseAuth.instance.signInAnonymously();
+    } catch (e) {
+      // Don't let an auth hiccup prevent the UI from loading at all.
+      debugPrint('Anonymous sign-in failed: $e');
+    }
+  }
+
   runApp(const MyApp());
 }
 
@@ -49,7 +59,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  
+
   String _selectedLanguage = 'thai';
   List<TranslationSuggestion> _suggestions = [];
   bool _showSuggestions = false;
@@ -68,25 +78,22 @@ class _TranslationScreenState extends State<TranslationScreen> {
 
   // The Firestore 'targetLanguage' value for the current direction.
   String get _effectiveTargetLanguage => _thaiToEnglish ? 'english' : _selectedLanguage;
-  
+
   // Admin state
   bool _isAdmin = false;
   String _adminName = '';
-  
-  // Admin credentials (stored in code for now, can move to Firebase later)
-  final String _adminPassword = 'phonetic2024';
-  
+
   final Map<String, String> _languages = {
     'thai': 'Thai (ไทย)',
     'chinese': 'Chinese (中文)',
     'japanese': 'Japanese (日本語)',
   };
-  
+
   // Admin login dialog
   void _showAdminLogin() {
     final TextEditingController nameController = TextEditingController();
     final TextEditingController passwordController = TextEditingController();
-    
+
     showDialog(
       context: context,
       builder: (BuildContext dialogContext) {
@@ -127,10 +134,10 @@ class _TranslationScreenState extends State<TranslationScreen> {
               child: Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () {
+              onPressed: () async {
                 String name = nameController.text.trim();
                 String password = passwordController.text;
-                
+
                 if (name.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -140,25 +147,21 @@ class _TranslationScreenState extends State<TranslationScreen> {
                   );
                   return;
                 }
-                
-                if (password == _adminPassword) {
+                try {
+                  await FirebaseAuth.instance.signInWithEmailAndPassword(
+                    email: 'kogyipalpal@gmail.com',
+                    password: password, // whatever they typed in the dialog
+                  );
                   setState(() {
                     _isAdmin = true;
                     _adminName = name;
                   });
-                  Navigator.of(dialogContext).pop();
+                  if (dialogContext.mounted) {
+                    Navigator.of(dialogContext).pop();
+                  }
+                } catch (e) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Welcome, Admin $name! 👹'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Wrong password!'),
-                      backgroundColor: Colors.red,
-                    ),
+                    const SnackBar(content: Text('Wrong password!')),
                   );
                 }
               },
@@ -169,21 +172,21 @@ class _TranslationScreenState extends State<TranslationScreen> {
       },
     );
   }
-  
+
   // Admin logout
-  void _adminLogout() {
+  void _adminLogout() async {
+    await FirebaseAuth.instance.signOut();
+    try {
+      await FirebaseAuth.instance.signInAnonymously();
+    } catch (e) {
+      debugPrint('Anonymous sign-in failed: $e');
+    }
     setState(() {
       _isAdmin = false;
       _adminName = '';
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Logged out'),
-        backgroundColor: Colors.grey,
-      ),
-    );
   }
-  
+
   // Delete translation (admin only)
   Future<void> _deleteTranslation(TranslationSuggestion suggestion) async {
     bool? confirm = await showDialog<bool>(
@@ -206,15 +209,15 @@ class _TranslationScreenState extends State<TranslationScreen> {
         );
       },
     );
-    
+
     if (confirm == true) {
       try {
         await _firestore.collection('translations').doc(suggestion.id).delete();
-        
+
         setState(() {
           _suggestions.removeWhere((s) => s.id == suggestion.id);
         });
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -235,11 +238,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
       }
     }
   }
-  
+
   // Edit translation (admin only)
   void _editTranslation(TranslationSuggestion suggestion) {
     final TextEditingController editController = TextEditingController(text: suggestion.text);
-    
+
     showDialog(
       context: context,
       builder: (BuildContext dialogContext) {
@@ -266,7 +269,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                     await _firestore.collection('translations').doc(suggestion.id).update({
                       'translation': newText,
                     });
-                    
+
                     setState(() {
                       int index = _suggestions.indexWhere((s) => s.id == suggestion.id);
                       if (index != -1) {
@@ -278,11 +281,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
                         );
                       }
                     });
-                    
+
                     if (dialogContext.mounted) {
                       Navigator.of(dialogContext).pop();
                     }
-                    
+
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
@@ -310,11 +313,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
       },
     );
   }
-  
+
   // Search function
   Future<void> _searchTranslations() async {
     String query = _searchController.text.trim().toLowerCase();
-    
+
     if (query.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -324,11 +327,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
       );
       return;
     }
-    
+
     setState(() {
       _isLoading = true;
     });
-    
+
     try {
       QuerySnapshot querySnapshot = await _firestore
           .collection('translations')
@@ -336,9 +339,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
           .where('name', isLessThanOrEqualTo: '$query\uf8ff')
           .limit(50)
           .get();
-      
+
       List<TranslationSuggestion> results = [];
-      
+
       for (var doc in querySnapshot.docs) {
         Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
         results.add(TranslationSuggestion(
@@ -348,13 +351,13 @@ class _TranslationScreenState extends State<TranslationScreen> {
           isUserSubmitted: data['isUserSubmitted'] ?? false,
         ));
       }
-      
+
       setState(() {
         _suggestions = results;
         _showSuggestions = true;
         _isLoading = false;
       });
-      
+
       if (results.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -369,7 +372,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       setState(() {
         _isLoading = false;
       });
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -380,13 +383,13 @@ class _TranslationScreenState extends State<TranslationScreen> {
       }
     }
   }
-  
+
   // Load translations from Firebase, combined with a basic phonetic-rule
   // suggestion (English <-> Thai) so users always have a starting point
   // even if nobody has added that name to the database yet.
   Future<void> _translateName() async {
     String name = _currentSourceText;
-    
+
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -396,15 +399,15 @@ class _TranslationScreenState extends State<TranslationScreen> {
       );
       return;
     }
-    
+
     setState(() {
       _isLoading = true;
       _showSuggestions = false;
       _lastRuleGuess = null;
     });
-    
+
     final String targetLanguage = _effectiveTargetLanguage;
-    
+
     try {
       QuerySnapshot querySnapshot = await _firestore
           .collection('translations')
@@ -412,9 +415,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
           .where('targetLanguage', isEqualTo: targetLanguage)
           .orderBy('votes', descending: true)
           .get();
-      
+
       List<TranslationSuggestion> loadedSuggestions = [];
-      
+
       for (var doc in querySnapshot.docs) {
         Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
         loadedSuggestions.add(TranslationSuggestion(
@@ -424,7 +427,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
           isUserSubmitted: data['isUserSubmitted'] ?? false,
         ));
       }
-      
+
       // If nobody's translated this exact multi-word name yet, try
       // combining already-submitted individual word translations from
       // the community database (e.g. words added one-by-one from a
@@ -453,7 +456,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
           }
         }
       }
-      
+
       // Combine with a basic phonetic-rule guess (English <-> Thai only).
       String? ruleGuess;
       if (_thaiToEnglish) {
@@ -461,7 +464,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       } else if (targetLanguage == 'thai') {
         ruleGuess = englishToThai(name);
       }
-      
+
       if (ruleGuess != null && ruleGuess.trim().isNotEmpty) {
         _lastRuleGuess = ruleGuess;
         final bool alreadyInDatabase = loadedSuggestions.any(
@@ -483,14 +486,14 @@ class _TranslationScreenState extends State<TranslationScreen> {
           );
         }
       }
-      
+
       setState(() {
         _suggestions = loadedSuggestions;
         _showSuggestions = true;
         _isLoading = false;
         _selectedTranslation = '';
       });
-      
+
       if (loadedSuggestions.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -506,7 +509,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       setState(() {
         _isLoading = false;
       });
-      
+
       if (mounted) {
         showDialog(
           context: context,
@@ -526,7 +529,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       }
     }
   }
-  
+
   // Splits text on whitespace into individual words, dropping empties.
   List<String> _splitIntoWords(String text) =>
       text.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
@@ -612,7 +615,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
     await batch.commit();
     return _SavePairResult(fullEntryId: fullRef.id, entryCount: entryCount);
   }
-  
+
   // Persist a generated (rule-based or word-combination) suggestion into
   // the shared database, so it becomes a normal, votable, community
   // entry from now on. Also splits multi-word names into individual word
@@ -625,7 +628,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
         targetLanguage: _effectiveTargetLanguage,
         isRuleGenerated: suggestion.isRuleBased,
       );
-      
+
       setState(() {
         int index = _suggestions.indexWhere((s) => s.id == suggestion.id && s.text == suggestion.text);
         if (index != -1) {
@@ -639,7 +642,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
           );
         }
       });
-      
+
       if (mounted) {
         final int wordCount = result.entryCount - 1;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -662,24 +665,24 @@ class _TranslationScreenState extends State<TranslationScreen> {
       }
     }
   }
-  
+
   Future<void> _selectSuggestion(TranslationSuggestion suggestion) async {
     setState(() {
       _selectedTranslation = suggestion.text;
     });
-    
+
     // Rule-based and word-combination suggestions aren't saved in
     // Firestore yet, so there's no document to vote on. Users can tap
     // "Save" to add it first.
     if (suggestion.isRuleBased || suggestion.isWordCombo) {
       return;
     }
-    
+
     try {
       await _firestore.collection('translations').doc(suggestion.id).update({
         'votes': FieldValue.increment(1),
       });
-      
+
       setState(() {
         int index = _suggestions.indexWhere((s) => s.id == suggestion.id);
         if (index != -1) {
@@ -691,7 +694,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
           );
         }
       });
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -711,7 +714,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       }
     }
   }
-  
+
   // Copies text to the clipboard — wired to its own dedicated button,
   // separate from voting/selecting, so it never interferes with them.
   Future<void> _copyToClipboard(String text) async {
@@ -725,11 +728,11 @@ class _TranslationScreenState extends State<TranslationScreen> {
       );
     }
   }
-  
+
   void _showAddTranslationDialog() {
     final TextEditingController suggestionController =
         TextEditingController(text: _lastRuleGuess ?? '');
-    
+
     showDialog(
       context: context,
       builder: (BuildContext dialogContext) {
@@ -774,14 +777,14 @@ class _TranslationScreenState extends State<TranslationScreen> {
                 String suggestion = suggestionController.text.trim();
                 if (suggestion.isNotEmpty) {
                   Navigator.of(dialogContext).pop();
-                  
+
                   try {
                     final _SavePairResult result = await _saveTranslationPair(
                       sourceText: _currentSourceText,
                       translationText: suggestion,
                       targetLanguage: _effectiveTargetLanguage,
                     );
-                    
+
                     setState(() {
                       _suggestions.add(TranslationSuggestion(
                         id: result.fullEntryId,
@@ -791,7 +794,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                       ));
                       _selectedTranslation = suggestion;
                     });
-                    
+
                     if (mounted) {
                       final int wordCount = result.entryCount - 1;
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -822,7 +825,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       },
     );
   }
-  
+
   void _clearAll() {
     setState(() {
       _nameController.clear();
@@ -892,7 +895,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
-            
+
             // Direction toggle
             Container(
               padding: const EdgeInsets.all(4),
@@ -962,7 +965,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
               ),
             ),
             const SizedBox(height: 32),
-            
+
             TextField(
               controller: _nameController,
               decoration: InputDecoration(
@@ -979,7 +982,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
               onSubmitted: (_) => _translateName(),
             ),
             const SizedBox(height: 24),
-            
+
             if (_thaiToEnglish)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1037,7 +1040,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                 ),
               ),
             const SizedBox(height: 32),
-            
+
             Row(
               children: [
                 Expanded(
@@ -1084,7 +1087,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
               ],
             ),
             const SizedBox(height: 40),
-            
+
             if (_showSuggestions) ...[
               Container(
                 padding: const EdgeInsets.all(20),
@@ -1117,7 +1120,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    
+
                     if (_suggestions.isEmpty)
                       const Center(
                         child: Padding(
@@ -1287,12 +1290,12 @@ class _TranslationScreenState extends State<TranslationScreen> {
                 ),
               ),
             ],
-            
+
             // Search bar moved to bottom
             const SizedBox(height: 40),
             Divider(),
             const SizedBox(height: 24),
-            
+
             Container(
               padding: EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -1350,7 +1353,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
                 ],
               ),
             ),
-            
+
             // Footer
             const SizedBox(height: 60),
             Container(
@@ -1413,7 +1416,7 @@ class _TranslationScreenState extends State<TranslationScreen> {
       ),
     );
   }
-  
+
   @override
   void dispose() {
     _nameController.dispose();
@@ -1429,7 +1432,7 @@ class TranslationSuggestion {
   final bool isUserSubmitted;
   final bool isRuleBased;
   final bool isWordCombo;
-  
+
   TranslationSuggestion({
     required this.id,
     required this.text,
