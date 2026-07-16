@@ -151,9 +151,9 @@ class _TranslationScreenState extends State<TranslationScreen> {
                     Navigator.of(dialogContext).pop();
                   }
                 } catch (e) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Wrong email or password!')),
-                  );
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Login error: $e')),
+                    );
                 }
               },
               child: Text('Login'),
